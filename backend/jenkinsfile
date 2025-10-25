@@ -1,0 +1,202 @@
+pipeline {
+  agent any
+
+  environment {
+    APP_REPO_URL         = 'https://github.com/tanPiyangkoon/it-request-backend.git'
+    APP_BRANCH           = 'staging'
+    APP_GIT_CREDENTIALS  = 'github-token'
+
+    DOCKER_REGISTRY       = 'docker.io'
+    DOCKER_IMAGE          = 'tanpiyangkoon/it-request-backend'
+    DOCKER_CREDENTIALS_ID = 'dockerhub-credentials'
+
+    DOCKER_NODE_IMAGE     = 'node:20-alpine'
+
+    GIT_CONFIG_REPO       = 'https://github.com/tanPiyangkoon/it-request-backend-kustomize.git'
+    GIT_CONFIG_BRANCH     = 'main'
+    GIT_CREDENTIALS_ID    = 'github-token'
+
+    ARGOCD_APP            = 'it-request-backend-service'
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
+
+  stages {
+
+    stage('Checkout Code') {
+      steps {
+        git branch: "${APP_BRANCH}", url: "${APP_REPO_URL}", credentialsId: "${APP_GIT_CREDENTIALS}"
+        script {
+          def shortSha = sh(script: "git rev-parse --short=11 HEAD", returnStdout: true).trim()
+          env.IMG_TAG = "${APP_BRANCH}-${shortSha}-${env.BUILD_NUMBER}"
+          echo "Image tag: ${env.IMG_TAG}"
+          env.HOST_UID = sh(script: 'id -u', returnStdout: true).trim()
+          env.HOST_GID = sh(script: 'id -g', returnStdout: true).trim()
+        }
+      }
+    }
+
+    stage('Build Application') {
+      steps {
+        script {
+          docker.image(env.DOCKER_NODE_IMAGE).inside("--user 0:0 -e HOST_UID=${env.HOST_UID} -e HOST_GID=${env.HOST_GID}") {
+            sh '''
+set -e
+apk add --no-cache git
+echo "Building application..."
+if [ -f package.json ]; then
+  corepack enable || true
+  npm ci
+  HAS_BUILD="$(node -p "try{(require('./package.json').scripts||{}).build ? '1':'0'}catch(e){'0'}")"
+  if [ "$HAS_BUILD" = "1" ]; then
+    npm run build
+  else
+    echo "No npm script: build -> skipping"
+  fi
+else
+  echo "No package.json found — skipping build."
+fi
+chown -R "$HOST_UID:$HOST_GID" .
+'''
+          }
+        }
+      }
+    }
+
+    stage('Run Tests') {
+      steps {
+        script {
+          docker.image(env.DOCKER_NODE_IMAGE).inside("--user 0:0 -e HOST_UID=${env.HOST_UID} -e HOST_GID=${env.HOST_GID}") {
+            sh '''
+set -e
+if [ -f package.json ]; then
+  HAS_TEST="$(node -p "try{(require('./package.json').scripts||{}).test ? '1':'0'}catch(e){'0'}")"
+  if [ "$HAS_TEST" = "1" ]; then
+    npm test --silent || exit $?
+  else
+    echo "No npm script: test -> skipping"
+  fi
+else
+  echo "No tests — skipping."
+fi
+chown -R "$HOST_UID:$HOST_GID" .
+'''
+          }
+        }
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'reports/**/*.xml'
+        }
+      }
+    }
+
+    stage('Build & Tag Docker Image') {
+      steps {
+        sh '''
+set -e
+echo "Building Docker image..."
+docker build -t ${DOCKER_IMAGE}:${IMG_TAG} -t ${DOCKER_IMAGE}:latest .
+'''
+      }
+    }
+
+    stage('Push Docker Image') {
+      steps {
+        script {
+          withCredentials([usernamePassword(
+            credentialsId: "${DOCKER_CREDENTIALS_ID}",
+            usernameVariable: 'DH_USER',
+            passwordVariable: 'DH_TOKEN'
+          )]) {
+            sh '''
+set -e
+echo "$DH_TOKEN" | docker login --username "$DH_USER" --password-stdin
+docker push ${DOCKER_IMAGE}:${IMG_TAG}
+docker push ${DOCKER_IMAGE}:latest
+docker logout || true
+'''
+          }
+        }
+      }
+    }
+
+    stage('Update Kubernetes Manifests (GitOps)') {
+      steps {
+        script {
+          withCredentials([usernamePassword(
+            credentialsId: "${GIT_CREDENTIALS_ID}",
+            usernameVariable: 'GIT_USER',
+            passwordVariable: 'GIT_TOKEN'
+          )]) {
+            sh '''
+set -e
+rm -rf k8s-config
+
+set +x
+git config --global url."https://${GIT_USER}:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+set -x
+
+git clone -b "${GIT_CONFIG_BRANCH}" "${GIT_CONFIG_REPO}" k8s-config
+cd k8s-config
+
+OVERLAY_DIR="overlays/${APP_BRANCH}"
+[ -d "$OVERLAY_DIR" ] || OVERLAY_DIR="overlays/production"
+cd "$OVERLAY_DIR"
+
+echo "=== kustomization.yaml BEFORE update ==="
+cat kustomization.yaml
+
+if command -v yq >/dev/null 2>&1; then
+  echo "Using yq to update image tag..."
+  yq -i "(.images[] | select(.name == \\"${DOCKER_IMAGE}\\").newTag) = \\"${IMG_TAG}\\"" kustomization.yaml
+else
+  echo "yq not found, using sed to update image tag..."
+  # Simple sed approach - match the image name and update newTag
+  sed -i "/name: tanpiyangkoon\\/it-request/,/newTag:/ s/newTag:.*/newTag: ${IMG_TAG}/" kustomization.yaml
+fi
+
+echo "=== kustomization.yaml AFTER update ==="
+cat kustomization.yaml
+
+git config user.email "jenkins@local"
+git config user.name "Jenkins CI"
+git add kustomization.yaml
+
+# Check if there are actual changes
+if git diff --staged --quiet; then
+  echo "⚠️  No changes detected in kustomization.yaml - tag might already be up to date"
+else
+  echo "✅ Changes detected, committing..."
+  git commit -m "CI: bump ${DOCKER_IMAGE} to ${IMG_TAG}"
+  git push origin "${GIT_CONFIG_BRANCH}"
+  echo "✅ Successfully pushed updated manifests"
+fi
+
+git config --global --unset url."https://${GIT_USER}:${GIT_TOKEN}@github.com/".insteadof || true
+'''
+          }
+        }
+      }
+    }
+
+    stage('Trigger ArgoCD Sync (optional)') {
+      when { expression { return env.ARGOCD_APP?.trim() } }
+      steps {
+        sh '''
+echo "Assuming ArgoCD auto-sync. Add argocd app sync here if needed."
+# Example: argocd app sync ${ARGOCD_APP} -y
+'''
+      }
+    }
+  }
+
+  post {
+    success { echo "✅ Build succeeded: ${DOCKER_IMAGE}:${IMG_TAG}" }
+    failure { echo '❌ Pipeline failed' }
+    always  { cleanWs() }
+  }
+}
