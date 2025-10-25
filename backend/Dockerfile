@@ -13,7 +13,4 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
 EXPOSE 3001
-
-# ใช้ npm start (ตรงกับ package.json)
-# CMD ["npm", "start"]
 CMD ["node", "server.js"]
