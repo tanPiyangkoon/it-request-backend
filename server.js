@@ -15,6 +15,15 @@ app.get('/', (req, res) => {
   });
 });
 
+// ← เพิ่ม Health Check Endpoint ตรงนี้
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.use('/api', requestRoutes);
