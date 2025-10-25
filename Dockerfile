@@ -7,7 +7,7 @@ RUN corepack enable || true && npm ci
 # ----- runtime -----
 FROM node:20-alpine
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=staging
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .

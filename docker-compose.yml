@@ -1,24 +1,5 @@
 services:
-  db:
-    image: postgres:15-alpine
-    container_name: it-request-db
-    environment:
-      POSTGRES_USER: ${PGUSER:-it_admin}
-      POSTGRES_PASSWORD: ${PGPASSWORD:-it_password}
-      POSTGRES_DB: ${PGDATABASE:-it_request_db}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./backend/db/migrations:/docker-entrypoint-initdb.d
-    ports:
-      - "5432:5432"
-    networks:
-      - it-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U it_admin"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
+  # ไม่ใช้ local DB container เพราะใช้ external PostgreSQL ที่ 192.168.2.50
 
   backend:
     build:
@@ -30,23 +11,17 @@ services:
     environment:
       - NODE_ENV=${NODE_ENV:-staging}
       - PORT=3001
-      - PGHOST=db
+      - PGHOST=192.168.2.50
       - PGUSER=${PGUSER:-it_admin}
       - PGPASSWORD=${PGPASSWORD:-it_password}
       - PGDATABASE=${PGDATABASE:-it_request_db}
       - PGPORT=5432
     volumes:
       - ./backend/uploads:/app/uploads
-    networks:
-      - it-network
-    depends_on:
-      db:
-        condition: service_healthy
+    extra_hosts:
+      - "db:192.168.2.50"
     restart: unless-stopped
 
 networks:
   it-network:
     driver: bridge
-
-volumes:
-  postgres_data:
