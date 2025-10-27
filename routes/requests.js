@@ -58,19 +58,17 @@ router.post('/login', async (req, res) => {
 
     // Compare password with hashed password
     const passwordMatch = await bcrypt.compare(password, user.password);
-
-    if (passwordMatch) {
-      // Don't send password back to client
-      delete user.password;
-      res.json({ success: true, user });
-    } else {
-      res.status(401).json({ success: false, message: 'รหัสผ่านหรือผู้ใช้ไม่ถูกต้อง' });
+    if (!match) {
+      return res.status(401).json({ success: false, message: 'รหัสผ่านผิด' });
     }
+
+    delete user.password;
+    res.json({ success: true, user });
   } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ success: false, message: 'Database error', details: err.message });
+    res.status(500).json({ success: false, message: 'DB error' });
   }
 });
+     
 
 // User registration endpoint
 router.post('/register', async (req, res) => {
